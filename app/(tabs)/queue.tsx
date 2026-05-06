@@ -31,7 +31,8 @@ export default function QueueScreen() {
       {isOnCourt(myName!) && (
         <View style={styles.infoBanner}>
           <Text style={styles.infoText}>
-            You are currently on a court. Leave the court to re-join the queue.
+            You are currently on a court. When you leave, you will
+            automatically return to the end of the queue.
           </Text>
         </View>
       )}
