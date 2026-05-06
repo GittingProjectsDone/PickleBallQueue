@@ -1,7 +1,5 @@
 import { useEffect, useState } from 'react';
-import {
-  doc, onSnapshot, setDoc, getDoc, updateDoc
-} from 'firebase/firestore';
+import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { db } from '@/firebase';
 
 export type Court = {
