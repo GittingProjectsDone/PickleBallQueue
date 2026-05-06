@@ -128,6 +128,7 @@ export function usePickleballState(myName: string | null) {
       const nonSkipped = avail.filter(p => !current.skipped.includes(p));
 
       if (openSlots === 4 && nonSkipped.length >= 4) {
+        // Completely empty court — assign full teams with history optimisation
         const top4 = nonSkipped.slice(0, 4);
         const { team1, team2 } = getBestTeamAssignment(top4, current);
         const newPlayers: CourtPlayer[] = [
@@ -160,6 +161,28 @@ export function usePickleballState(myName: string | null) {
           skipped: current.skipped.filter(p => !top4.includes(p)),
           teammateHistory: newTeammateHistory,
           history: [newHistory, ...current.history.slice(0, 49)],
+        };
+      } else if (openSlots > 0 && openSlots < 4 && nonSkipped.length >= openSlots) {
+        // Partially filled court — pull from queue one-by-one to fill the gaps
+        const toAdd = nonSkipped.slice(0, openSlots);
+        const updatedPlayers = [...court.players] as (CourtPlayer | null)[];
+        let queueIdx = 0;
+        for (let i = 0; i < updatedPlayers.length; i++) {
+          if (!updatedPlayers[i] && queueIdx < toAdd.length) {
+            updatedPlayers[i] = {
+              name: toAdd[queueIdx],
+              team: i < 2 ? 1 : 2,
+            };
+            queueIdx++;
+          }
+        }
+        current = {
+          ...current,
+          courts: current.courts.map(c =>
+            c.id === court.id ? { ...c, players: updatedPlayers } : c
+          ),
+          queue: current.queue.filter(p => !toAdd.includes(p)),
+          skipped: current.skipped.filter(p => !toAdd.includes(p)),
         };
       }
     }
