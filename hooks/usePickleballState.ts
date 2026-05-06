@@ -160,8 +160,9 @@ export function usePickleballState(myName: string | null) {
           skipped: current.skipped.filter(p => !top4.includes(p)),
           teammateHistory: newTeammateHistory,
           history: [newHistory, ...current.history.slice(0, 49)],
-          // Clear dismissed list when a court fills — fresh game, fresh prompts
-          promptDismissed: [],
+          // Remove placed players from dismissed list (they're on court now, not in queue)
+          // Keep everyone else's dismissal so the banner doesn't reappear
+          promptDismissed: (current.promptDismissed ?? []).filter(p => !top4.includes(p)),
         };
       }
     }
