@@ -14,7 +14,7 @@ export default function RootLayout() {
   if (!myName) {
     return (
       <View style={styles.container}>
-        <Text style={styles.title}>Welcome to PickleBall Queue</Text>
+        <Text style={styles.title}>Welcome to Pickleball Queue</Text>
         <Text style={styles.sub}>Enter your name to get started</Text>
         <TextInput
           style={styles.input}
