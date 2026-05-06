@@ -1,8 +1,10 @@
 import { View, Text, StyleSheet, FlatList, ActivityIndicator } from 'react-native';
 import { usePickleballState } from '@/hooks/usePickleballState';
+import { usePlayerName } from '@/hooks/use-player-name';
 
 export default function HistoryScreen() {
-  const { state, loading } = usePickleballState();
+  const { myName } = usePlayerName();
+  const { state, loading } = usePickleballState(myName);
 
   if (loading) return (
     <View style={styles.center}><ActivityIndicator size="large" /></View>
@@ -21,7 +23,21 @@ export default function HistoryScreen() {
                   <Text style={styles.courtLabel}>{item.court}</Text>
                   <Text style={styles.time}>{item.time}</Text>
                 </View>
-                <Text style={styles.players}>{item.players.join(', ')}</Text>
+                <View style={styles.teams}>
+                  <View style={styles.team}>
+                    <Text style={styles.teamLabel}>Team 1</Text>
+                    <Text style={styles.teamPlayers}>
+                      {item.team1.join(' & ')}
+                    </Text>
+                  </View>
+                  <Text style={styles.vs}>vs</Text>
+                  <View style={styles.team}>
+                    <Text style={styles.teamLabel}>Team 2</Text>
+                    <Text style={styles.teamPlayers}>
+                      {item.team2.join(' & ')}
+                    </Text>
+                  </View>
+                </View>
               </View>
             )}
           />
@@ -36,9 +52,13 @@ const styles = StyleSheet.create({
   card: { backgroundColor: '#fff', borderRadius: 10, padding: 12,
     marginBottom: 8, borderWidth: 0.5, borderColor: '#ddd' },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between',
-    marginBottom: 4 },
+    marginBottom: 8 },
   courtLabel: { fontSize: 14, fontWeight: '500' },
   time: { fontSize: 12, color: '#999' },
-  players: { fontSize: 13, color: '#555' },
+  teams: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  team: { flex: 1 },
+  teamLabel: { fontSize: 11, color: '#999', marginBottom: 2 },
+  teamPlayers: { fontSize: 13, fontWeight: '500' },
+  vs: { fontSize: 12, color: '#999' },
   empty: { textAlign: 'center', color: '#999', marginTop: 40, fontSize: 14 },
 });
