@@ -2,22 +2,27 @@ import { useEffect, useState } from 'react';
 import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { db } from '@/firebase';
 
+export type CourtPlayer = { name: string; team: 1 | 2 };
+
 export type Court = {
   id: number;
-  players: (string | null)[];
+  players: (CourtPlayer | null)[];
 };
 
 export type HistoryEntry = {
   court: string;
-  players: string[];
+  team1: string[];
+  team2: string[];
   time: string;
 };
 
 export type AppState = {
   courts: Court[];
   queue: string[];
+  skipped: string[];
   history: HistoryEntry[];
-  matchups: Record<string, number>;
+  teammateHistory: Record<string, number>;
+  overrideMode: boolean;
 };
 
 const DEFAULT_STATE: AppState = {
@@ -26,27 +31,35 @@ const DEFAULT_STATE: AppState = {
     players: [null, null, null, null],
   })),
   queue: [],
+  skipped: [],
   history: [],
-  matchups: {},
+  teammateHistory: {},
+  overrideMode: false,
 };
 
 const STATE_DOC = doc(db, 'app', 'state');
 
-export function usePickleballState() {
+export function usePickleballState(myName: string | null) {
   const [state, setState] = useState<AppState>(DEFAULT_STATE);
   const [loading, setLoading] = useState(true);
+  const [pendingCourtId, setPendingCourtId] = useState<number | null>(null);
 
   useEffect(() => {
     const unsub = onSnapshot(STATE_DOC, (snap) => {
       if (snap.exists()) {
-        setState(snap.data() as AppState);
+        const data = snap.data() as AppState;
+        setState(data);
+
+        if (myName) {
+          checkIfShouldPrompt(data, myName);
+        }
       } else {
         setDoc(STATE_DOC, DEFAULT_STATE);
       }
       setLoading(false);
     });
     return unsub;
-  }, []);
+  }, [myName]);
 
   const update = async (newState: AppState) => {
     await setDoc(STATE_DOC, newState);
@@ -54,104 +67,175 @@ export function usePickleballState() {
 
   const pairKey = (a: string, b: string) => [a, b].sort().join('|');
 
-  const getMatchupCount = (a: string, b: string) =>
-    state.matchups[pairKey(a, b)] || 0;
+  const getTeammateCount = (a: string, b: string, s: AppState = state) =>
+    s.teammateHistory[pairKey(a, b)] || 0;
 
-  const scorePlayer = (player: string, existing: string[]) =>
-    existing.filter(Boolean).reduce(
-      (sum, ep) => sum + getMatchupCount(player, ep), 0
-    );
+  const scoreTeammate = (player: string, teammate: string) =>
+    getTeammateCount(player, teammate);
 
-  const availablePlayers = () => {
-    const onCourt = new Set(
-      state.courts.flatMap(c => c.players.filter(Boolean))
-    );
-    return state.queue.filter(p => !onCourt.has(p));
+  const onCourtNames = (s: AppState = state) =>
+    new Set(s.courts.flatMap(c => c.players.filter(Boolean).map(p => p!.name)));
+
+  const availableQueue = (s: AppState = state) => {
+    const on = onCourtNames(s);
+    return s.queue.filter(p => !on.has(p));
   };
 
-  const addToQueue = async (name: string) => {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    const alreadyQueued = state.queue.includes(trimmed);
-    const onCourt = state.courts.some(c => c.players.includes(trimmed));
-    if (alreadyQueued || onCourt) return false;
-    await update({ ...state, queue: [...state.queue, trimmed] });
+  const checkIfShouldPrompt = (s: AppState, name: string) => {
+    const avail = availableQueue(s);
+    const openCourts = s.courts.filter(c => c.players.some(p => !p));
+    if (openCourts.length === 0) return;
+    const nonSkipped = avail.filter(p => !s.skipped.includes(p));
+    if (nonSkipped[0] === name) {
+      setPendingCourtId(openCourts[0].id);
+    }
+  };
+
+  const getBestTeamAssignment = (
+    candidates: string[],
+    s: AppState = state
+  ): { team1: string[]; team2: string[] } => {
+    if (candidates.length < 4) return { team1: [], team2: [] };
+    const [a, b, c, d] = candidates;
+    const options = [
+      { team1: [a, b], team2: [c, d] },
+      { team1: [a, c], team2: [b, d] },
+      { team1: [a, d], team2: [b, c] },
+    ];
+    const scored = options.map(opt => ({
+      ...opt,
+      score:
+        getTeammateCount(opt.team1[0], opt.team1[1], s) +
+        getTeammateCount(opt.team2[0], opt.team2[1], s),
+    }));
+    scored.sort((a, b) => a.score - b.score);
+    return scored[0];
+  };
+
+  const fillOpenCourts = async (s: AppState): Promise<AppState> => {
+    let current = { ...s };
+    for (const court of current.courts) {
+      const openSlots = court.players.filter(p => !p).length;
+      if (openSlots === 0) continue;
+
+      const avail = availableQueue(current);
+      const nonSkipped = avail.filter(p => !current.skipped.includes(p));
+
+      if (openSlots === 4 && nonSkipped.length >= 4) {
+        const top4 = nonSkipped.slice(0, 4);
+        const { team1, team2 } = getBestTeamAssignment(top4, current);
+        const newPlayers: CourtPlayer[] = [
+          { name: team1[0], team: 1 },
+          { name: team1[1], team: 1 },
+          { name: team2[0], team: 2 },
+          { name: team2[1], team: 2 },
+        ];
+        let newTeammateHistory = { ...current.teammateHistory };
+        const k1 = pairKey(team1[0], team1[1]);
+        const k2 = pairKey(team2[0], team2[1]);
+        newTeammateHistory[k1] = (newTeammateHistory[k1] || 0) + 1;
+        newTeammateHistory[k2] = (newTeammateHistory[k2] || 0) + 1;
+
+        const newHistory: HistoryEntry = {
+          court: `Court ${court.id}`,
+          team1,
+          team2,
+          time: new Date().toLocaleTimeString([], {
+            hour: '2-digit', minute: '2-digit',
+          }),
+        };
+
+        current = {
+          ...current,
+          courts: current.courts.map(c =>
+            c.id === court.id ? { ...c, players: newPlayers } : c
+          ),
+          queue: current.queue.filter(p => !top4.includes(p)),
+          skipped: current.skipped.filter(p => !top4.includes(p)),
+          teammateHistory: newTeammateHistory,
+          history: [newHistory, ...current.history.slice(0, 49)],
+        };
+      }
+    }
+    return current;
+  };
+
+  const joinQueue = async (name: string) => {
+    if (state.queue.includes(name)) return false;
+    if (onCourtNames().has(name)) return false;
+    const newState = await fillOpenCourts({
+      ...state,
+      queue: [...state.queue, name],
+    });
+    await update(newState);
     return true;
   };
 
-  const removeFromQueue = async (name: string) => {
-    await update({ ...state, queue: state.queue.filter(p => p !== name) });
+  const skipTurn = async (name: string) => {
+    if (state.skipped.includes(name)) return;
+    const newSkipped = [...state.skipped, name];
+    const newState = await fillOpenCourts({ ...state, skipped: newSkipped });
+    await update(newState);
   };
 
-  const assignPlayer = async (
-    courtId: number, slotIdx: number, playerName: string
+  const acceptTurn = async (name: string) => {
+    setPendingCourtId(null);
+    const newState = await fillOpenCourts({
+      ...state,
+      skipped: state.skipped.filter(p => p !== name),
+    });
+    await update(newState);
+  };
+
+  const removeFromCourt = async (courtId: number, playerName: string) => {
+    const court = state.courts.find(c => c.id === courtId)!;
+    const isOnCourt = court.players.some(p => p?.name === playerName);
+    if (!isOnCourt) return;
+
+    const newCourts = state.courts.map(c => {
+      if (c.id !== courtId) return c;
+      return {
+        ...c,
+        players: c.players.map(p =>
+          p?.name === playerName ? null : p
+        ),
+      };
+    });
+
+    const newState = await fillOpenCourts({
+      ...state,
+      courts: newCourts,
+    });
+    await update(newState);
+  };
+
+  const overrideAssign = async (
+    courtId: number,
+    slotIdx: number,
+    playerName: string | null
   ) => {
     const newCourts = state.courts.map(c => {
       if (c.id !== courtId) return c;
       const newPlayers = [...c.players];
-      newPlayers[slotIdx] = playerName;
+      newPlayers[slotIdx] = playerName
+        ? { name: playerName, team: slotIdx < 2 ? 1 : 2 }
+        : null;
       return { ...c, players: newPlayers };
     });
-    const newQueue = state.queue.filter(p => p !== playerName);
-    let newMatchups = { ...state.matchups };
-    let newHistory = [...state.history];
-
-    const court = newCourts.find(c => c.id === courtId)!;
-    if (court.players.every(Boolean)) {
-      const players = court.players as string[];
-      for (let i = 0; i < players.length; i++) {
-        for (let j = i + 1; j < players.length; j++) {
-          const k = pairKey(players[i], players[j]);
-          newMatchups[k] = (newMatchups[k] || 0) + 1;
-        }
-      }
-      newHistory = [{
-        court: `Court ${courtId}`,
-        players,
-        time: new Date().toLocaleTimeString([], {
-          hour: '2-digit', minute: '2-digit'
-        }),
-      }, ...newHistory.slice(0, 49)];
-    }
-
-    await update({
-      ...state,
-      courts: newCourts,
-      queue: newQueue,
-      matchups: newMatchups,
-      history: newHistory,
-    });
+    await update({ ...state, courts: newCourts });
   };
 
-  const removeFromCourt = async (courtId: number, slotIdx: number) => {
-    const court = state.courts.find(c => c.id === courtId)!;
-    const name = court.players[slotIdx];
-    if (!name) return;
-    const newCourts = state.courts.map(c => {
-      if (c.id !== courtId) return c;
-      const newPlayers = [...c.players];
-      newPlayers[slotIdx] = null;
-      return { ...c, players: newPlayers };
-    });
-    const newQueue = state.queue.includes(name)
-      ? state.queue
-      : [name, ...state.queue];
-    await update({ ...state, courts: newCourts, queue: newQueue });
+  const toggleOverride = async () => {
+    await update({ ...state, overrideMode: !state.overrideMode });
   };
 
-  const suggestNext = (court: Court) => {
-    const avail = availablePlayers();
-    const existing = court.players.filter(Boolean) as string[];
-    if (!avail.length) return null;
-    return avail.slice().sort(
-      (a, b) => scorePlayer(a, existing) - scorePlayer(b, existing)
-    )[0];
-  };
+  const isOnCourt = (name: string) => onCourtNames().has(name);
+  const isInQueue = (name: string) => state.queue.includes(name);
 
   return {
-    state, loading, availablePlayers,
-    addToQueue, removeFromQueue,
-    assignPlayer, removeFromCourt,
-    suggestNext, scorePlayer, getMatchupCount,
+    state, loading, pendingCourtId, setPendingCourtId,
+    availableQueue, joinQueue, skipTurn, acceptTurn,
+    removeFromCourt, overrideAssign, toggleOverride,
+    isOnCourt, isInQueue, getBestTeamAssignment,
   };
 }
