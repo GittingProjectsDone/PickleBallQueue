@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 import { db } from '@/firebase';
 
@@ -42,25 +42,18 @@ const STATE_DOC = doc(db, 'app', 'state');
 export function usePickleballState(myName: string | null) {
   const [state, setState] = useState<AppState>(DEFAULT_STATE);
   const [loading, setLoading] = useState(true);
-  const [pendingCourtId, setPendingCourtId] = useState<number | null>(null);
-  const promptDismissedRef = useRef(false);
 
   useEffect(() => {
     const unsub = onSnapshot(STATE_DOC, (snap) => {
       if (snap.exists()) {
-        const data = snap.data() as AppState;
-        setState(data);
-
-        if (myName) {
-          checkIfShouldPrompt(data, myName);
-        }
+        setState(snap.data() as AppState);
       } else {
         setDoc(STATE_DOC, DEFAULT_STATE);
       }
       setLoading(false);
     });
     return unsub;
-  }, [myName]);
+  }, []);
 
   const update = async (newState: AppState) => {
     await setDoc(STATE_DOC, newState);
@@ -79,21 +72,18 @@ export function usePickleballState(myName: string | null) {
     return s.queue.filter(p => !on.has(p));
   };
 
-  const checkIfShouldPrompt = (s: AppState, name: string) => {
-    const avail = availableQueue(s);
-    const openCourts = s.courts.filter(c => c.players.every(p => !p));
-    const nonSkipped = avail.filter(p => !s.skipped.includes(p));
-    // Reset dismissed flag if the player is no longer in position to be prompted
-    // (e.g. someone else joined ahead, or courts filled) — so next time they reach
-    // the front of the queue they get prompted again
-    if (openCourts.length === 0 || nonSkipped[0] !== name || nonSkipped.length < 4) {
-      promptDismissedRef.current = false;
-      return;
-    }
-    if (!promptDismissedRef.current) {
-      setPendingCourtId(openCourts[0].id);
-    }
-  };
+  // Derived from state — no local state needed, never gets out of sync
+  const shouldPrompt = (() => {
+    if (!myName) return false;
+    const avail = availableQueue(state);
+    const nonSkipped = avail.filter(p => !state.skipped.includes(p));
+    const openCourts = state.courts.filter(c => c.players.every(p => !p));
+    return (
+      openCourts.length > 0 &&
+      nonSkipped.length >= 4 &&
+      nonSkipped[0] === myName
+    );
+  })();
 
   const getBestTeamAssignment = (
     candidates: string[],
@@ -182,16 +172,14 @@ export function usePickleballState(myName: string | null) {
 
   const skipTurn = async (name: string) => {
     if (state.skipped.includes(name)) return;
-    promptDismissedRef.current = true;
-    setPendingCourtId(null);
-    const newSkipped = [...state.skipped, name];
-    const newState = await fillOpenCourts({ ...state, skipped: newSkipped });
+    const newState = await fillOpenCourts({
+      ...state,
+      skipped: [...state.skipped, name],
+    });
     await update(newState);
   };
 
   const acceptTurn = async (name: string) => {
-    promptDismissedRef.current = true;
-    setPendingCourtId(null);
     const newState = await fillOpenCourts({
       ...state,
       skipped: state.skipped.filter(p => p !== name),
@@ -208,9 +196,7 @@ export function usePickleballState(myName: string | null) {
       if (c.id !== courtId) return c;
       return {
         ...c,
-        players: c.players.map(p =>
-          p?.name === playerName ? null : p
-        ),
+        players: c.players.map(p => p?.name === playerName ? null : p),
       };
     });
 
@@ -250,7 +236,7 @@ export function usePickleballState(myName: string | null) {
   const isInQueue = (name: string) => state.queue.includes(name);
 
   return {
-    state, loading, pendingCourtId, setPendingCourtId,
+    state, loading, shouldPrompt,
     availableQueue, joinQueue, skipTurn, acceptTurn,
     removeFromCourt, overrideAssign, toggleOverride,
     isOnCourt, isInQueue, getBestTeamAssignment,
