@@ -23,9 +23,7 @@ export type AppState = {
   history: HistoryEntry[];
   teammateHistory: Record<string, number>;
   overrideMode: boolean;
-  // Players who have tapped "Play" and are waiting for 3 others to confirm
   accepted: string[];
-  // Players who have already been shown and dismissed the banner this round
   promptDismissed: string[];
 };
 
@@ -45,6 +43,21 @@ const DEFAULT_STATE: AppState = {
 
 const STATE_DOC = doc(db, 'app', 'state');
 
+// Pure helper — all logic operates on explicit state, no closure over outer state
+const getOnCourtNames = (s: AppState): Set<string> =>
+  new Set(s.courts.flatMap(c => c.players.filter(Boolean).map(p => p!.name)));
+
+const getAvailableQueue = (s: AppState): string[] => {
+  const on = getOnCourtNames(s);
+  return s.queue.filter(p => !on.has(p));
+};
+
+const getActiveGroup = (s: AppState): string[] => {
+  const avail = getAvailableQueue(s);
+  const nonSkipped = avail.filter(p => !(s.skipped ?? []).includes(p));
+  return nonSkipped.slice(0, 4);
+};
+
 export function usePickleballState(myName: string | null) {
   const [state, setState] = useState<AppState>(DEFAULT_STATE);
   const [loading, setLoading] = useState(true);
@@ -53,8 +66,7 @@ export function usePickleballState(myName: string | null) {
   useEffect(() => {
     const unsub = onSnapshot(STATE_DOC, (snap) => {
       if (snap.exists()) {
-        const data = snap.data() as AppState;
-        setState({ ...DEFAULT_STATE, ...data });
+        setState({ ...DEFAULT_STATE, ...snap.data() as AppState });
       } else {
         setDoc(STATE_DOC, DEFAULT_STATE);
       }
@@ -69,92 +81,38 @@ export function usePickleballState(myName: string | null) {
 
   const pairKey = (a: string, b: string) => [a, b].sort().join('|');
 
-  const getTeammateCount = (a: string, b: string, s: AppState = state) =>
+  const getTeammateCount = (a: string, b: string, s: AppState): number =>
     s.teammateHistory[pairKey(a, b)] || 0;
-
-  const onCourtNames = (s: AppState = state) =>
-    new Set(s.courts.flatMap(c => c.players.filter(Boolean).map(p => p!.name)));
-
-  const availableQueue = (s: AppState = state) => {
-    const on = onCourtNames(s);
-    return s.queue.filter(p => !on.has(p));
-  };
-
-  // The active group is the first 4 non-skipped players in the queue.
-  // All of them should see the banner simultaneously.
-  const getActiveGroup = (s: AppState = state): string[] => {
-    const avail = availableQueue(s);
-    const nonSkipped = avail.filter(p => !(s.skipped ?? []).includes(p));
-    return nonSkipped.slice(0, 4);
-  };
-
-  const activeGroup = getActiveGroup();
-  const hasOpenCourt = state.courts.some(c => c.players.every(p => !p));
-
-  // This player should see the banner if:
-  // - there's an open court
-  // - there are 4+ non-skipped players available
-  // - they are in the active group
-  // - they haven't dismissed it this round
-  const promptConditionsMet = (() => {
-    if (!myName) return false;
-    if (!hasOpenCourt) return false;
-    if (activeGroup.length < 4) return false;
-    if (!activeGroup.includes(myName)) return false;
-    if ((state.promptDismissed ?? []).includes(myName)) return false;
-    return true;
-  })();
-
-  if (promptConditionsMet && !bannerActiveRef.current) {
-    bannerActiveRef.current = true;
-  } else if (!promptConditionsMet) {
-    bannerActiveRef.current = false;
-  }
-  const shouldPrompt = bannerActiveRef.current;
-
-  // How many of the active group have accepted so far
-  const acceptedCount = (state.accepted ?? []).filter(p =>
-    activeGroup.includes(p)
-  ).length;
 
   const getBestTeamAssignment = (
     candidates: string[],
-    s: AppState = state
+    s: AppState
   ): { team1: string[]; team2: string[] } => {
     if (candidates.length < 4) return { team1: [], team2: [] };
-
     const shuffled = [...candidates].sort(() => Math.random() - 0.5);
     const [a, b, c, d] = shuffled;
-
     const options = [
       { team1: [a, b], team2: [c, d] },
       { team1: [a, c], team2: [b, d] },
       { team1: [a, d], team2: [b, c] },
     ];
-
-    const scored = options.map(opt => ({
-      ...opt,
-      score:
-        getTeammateCount(opt.team1[0], opt.team1[1], s) +
-        getTeammateCount(opt.team2[0], opt.team2[1], s),
-    }));
-
-    scored.sort((a, b) => a.score - b.score);
-    return scored[0];
+    options.sort((x, y) =>
+      (getTeammateCount(x.team1[0], x.team1[1], s) + getTeammateCount(x.team2[0], x.team2[1], s)) -
+      (getTeammateCount(y.team1[0], y.team1[1], s) + getTeammateCount(y.team2[0], y.team2[1], s))
+    );
+    return options[0];
   };
 
-  // Try to fill a court with the accepted players if all 4 have confirmed
+  // Try to fill a court — always operates on explicit s, never on outer state
   const tryFillWithAccepted = (s: AppState): AppState => {
     const group = getActiveGroup(s);
-    const confirmedInGroup = (s.accepted ?? []).filter(p => group.includes(p));
-
-    // Not enough confirmed yet
-    if (confirmedInGroup.length < 4) return s;
+    const confirmed = (s.accepted ?? []).filter(p => group.includes(p));
+    if (confirmed.length < 4) return s;
 
     const openCourt = s.courts.find(c => c.players.every(p => !p));
     if (!openCourt) return s;
 
-    const top4 = confirmedInGroup.slice(0, 4);
+    const top4 = confirmed.slice(0, 4);
     const { team1, team2 } = getBestTeamAssignment(top4, s);
 
     const newPlayers: CourtPlayer[] = [
@@ -165,18 +123,14 @@ export function usePickleballState(myName: string | null) {
     ];
 
     let newTeammateHistory = { ...s.teammateHistory };
-    const k1 = pairKey(team1[0], team1[1]);
-    const k2 = pairKey(team2[0], team2[1]);
-    newTeammateHistory[k1] = (newTeammateHistory[k1] || 0) + 1;
-    newTeammateHistory[k2] = (newTeammateHistory[k2] || 0) + 1;
+    newTeammateHistory[pairKey(team1[0], team1[1])] = (newTeammateHistory[pairKey(team1[0], team1[1])] || 0) + 1;
+    newTeammateHistory[pairKey(team2[0], team2[1])] = (newTeammateHistory[pairKey(team2[0], team2[1])] || 0) + 1;
 
     const newHistory: HistoryEntry = {
       court: `Court ${openCourt.id}`,
       team1,
       team2,
-      time: new Date().toLocaleTimeString([], {
-        hour: '2-digit', minute: '2-digit',
-      }),
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
 
     return {
@@ -193,18 +147,37 @@ export function usePickleballState(myName: string | null) {
     };
   };
 
+  // Derived values from current state
+  const activeGroup = getActiveGroup(state);
+  const hasOpenCourt = state.courts.some(c => c.players.every(p => !p));
+
+  const promptConditionsMet = (() => {
+    if (!myName) return false;
+    if (!hasOpenCourt) return false;
+    if (activeGroup.length < 4) return false;
+    if (!activeGroup.includes(myName)) return false;
+    if ((state.promptDismissed ?? []).includes(myName)) return false;
+    return true;
+  })();
+
+  if (promptConditionsMet && !bannerActiveRef.current) {
+    bannerActiveRef.current = true;
+  } else if (!promptConditionsMet) {
+    bannerActiveRef.current = false;
+  }
+  const shouldPrompt = bannerActiveRef.current;
+
+  const acceptedCount = (state.accepted ?? []).filter(p =>
+    activeGroup.includes(p)
+  ).length;
+
   const joinQueue = async (name: string) => {
     if (state.queue.includes(name)) return false;
-    if (onCourtNames().has(name)) return false;
-    const newState: AppState = {
-      ...state,
-      queue: [...state.queue, name],
-    };
-    await update(newState);
+    if (getOnCourtNames(state).has(name)) return false;
+    await update({ ...state, queue: [...state.queue, name] });
     return true;
   };
 
-  // "Play" — add to accepted list, fill court if all 4 are in
   const acceptTurn = async (name: string) => {
     if ((state.accepted ?? []).includes(name)) return;
     const withAccepted: AppState = {
@@ -212,39 +185,43 @@ export function usePickleballState(myName: string | null) {
       accepted: [...(state.accepted ?? []), name],
       promptDismissed: [...(state.promptDismissed ?? []), name],
     };
-    const newState = tryFillWithAccepted(withAccepted);
-    await update(newState);
+    await update(tryFillWithAccepted(withAccepted));
   };
 
-  // "Let next go" — remove from active group, shift next player in
   const skipTurn = async (name: string) => {
     if ((state.skipped ?? []).includes(name)) return;
-    const newState: AppState = {
+    await update({
       ...state,
       skipped: [...(state.skipped ?? []), name],
       accepted: (state.accepted ?? []).filter(p => p !== name),
       promptDismissed: [...(state.promptDismissed ?? []), name],
-    };
-    await update(newState);
+    });
   };
 
   const removeFromCourt = async (courtId: number, playerName: string) => {
     const court = state.courts.find(c => c.id === courtId)!;
     if (!court.players.some(p => p?.name === playerName)) return;
 
-    const newCourts = state.courts.map(c => {
-      if (c.id !== courtId) return c;
-      return {
+    const newCourts = state.courts.map(c =>
+      c.id !== courtId ? c : {
         ...c,
         players: c.players.map(p => p?.name === playerName ? null : p),
-      };
-    });
+      }
+    );
 
     const newQueue = state.queue.includes(playerName)
       ? state.queue
       : [...state.queue, playerName];
 
-    await update({ ...state, courts: newCourts, queue: newQueue });
+    // Clear this player's dismissal so they get prompted again
+    const newPromptDismissed = (state.promptDismissed ?? []).filter(p => p !== playerName);
+
+    await update({
+      ...state,
+      courts: newCourts,
+      queue: newQueue,
+      promptDismissed: newPromptDismissed,
+    });
   };
 
   const overrideAssign = async (
@@ -267,8 +244,9 @@ export function usePickleballState(myName: string | null) {
     await update({ ...state, overrideMode: !state.overrideMode });
   };
 
-  const isOnCourt = (name: string) => onCourtNames().has(name);
+  const isOnCourt = (name: string) => getOnCourtNames(state).has(name);
   const isInQueue = (name: string) => state.queue.includes(name);
+  const availableQueue = () => getAvailableQueue(state);
 
   return {
     state, loading, shouldPrompt, acceptedCount, activeGroup,
